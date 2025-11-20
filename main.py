@@ -6,6 +6,7 @@ import time
 import os
 import secrets
 import requests
+import trading_bot_lib
 from typing import Dict, Optional
 
 from fastapi import (
