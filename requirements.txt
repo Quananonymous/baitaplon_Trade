@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+requests
+websocket-client
+numpy
+python-multipart
+SQLAlchemy
+psycopg2-binary
+PyJWT
