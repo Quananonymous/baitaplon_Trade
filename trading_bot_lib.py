@@ -55,8 +55,7 @@ def setup_logging():
         logger.addHandler(fh)
 
     return logger
-
-
+logger = setup_logging()  
 # ========== HÀM HỖ TRỢ TELEGRAM ==========
 def escape_html(text: str) -> str:
     if not text:
