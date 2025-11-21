@@ -12,6 +12,7 @@ let priceChart = null;
 let priceData = [];
 let labelData = [];
 let ws = null;
+let keepAliveIntervalId = null;
 let currentSymbol = "BTCUSDT"; // 👈 coin đang vẽ biểu đồ
 let currentInterval = "1s"; // 👈 khung thời gian: 1s,1m,5m,15m,1h,4h,1d
 
@@ -31,6 +32,20 @@ async function apiRequest(path, { method = "GET", body = null, auth = true } = {
         throw new Error(text || `HTTP ${res.status}`);
     }
     return res.json();
+}
+
+function startKeepAlive() {
+    if (keepAliveIntervalId) {
+        clearInterval(keepAliveIntervalId);
+    }
+    keepAliveIntervalId = setInterval(async () => {
+        try {
+            await apiRequest("/api/ping", { method: "GET", auth: false });
+            console.log("keep-alive ping");
+        } catch (e) {
+            console.warn("keep-alive ping error", e);
+        }
+    }, 20000);
 }
 
 // ================= DOM helper =================
@@ -73,45 +88,47 @@ function renderBaseLayout(innerHTML) {
                 <button class="sidebar-btn danger" id="btn-logout">Đăng xuất</button>
               </div>
             </aside>
-            <main class="content">
+            <main class="main">
               ${innerHTML}
             </main>
           </div>
         </div>
     `;
 
-    document.getElementById("btn-logout").addEventListener("click", () => {
-        authToken = null;
-        currentUsername = null;
-        localStorage.removeItem("authToken");
-        localStorage.removeItem("username");
-        renderAuthScreen();
-    });
-
     setupSidebarEvents();
+    const logoutBtn = document.getElementById("btn-logout");
+    if (logoutBtn) {
+        logoutBtn.addEventListener("click", () => {
+            authToken = null;
+            currentUsername = null;
+            localStorage.removeItem("authToken");
+            localStorage.removeItem("username");
+            renderAuthScreen();
+        });
+    }
 }
 
 // ================= Auth screen =================
 function renderAuthScreen(message = "") {
     const app = document.getElementById("app");
     app.innerHTML = `
-      <div class="auth-container">
-        <div class="auth-card">
-          <h1>QUAN TERMINAL</h1>
-          <p style="color:#9ca3af;">Binance Futures dashboard (có thể dùng thật, cẩn thận vốn)</p>
-          ${message ? `<p class="auth-message">${message}</p>` : ""}
+      <div class="auth-wrapper">
+        <div class="auth-panel">
+          <h1>QUAN Terminal</h1>
+          <p class="sub">Demo Binance Futures trading dashboard</p>
+          ${message ? `<p class="status">${message}</p>` : ""}
           <form id="login-form">
             <div class="form-group">
               <label>Username</label>
-              <input name="username" required />
+              <input id="login-username" type="text" required />
             </div>
             <div class="form-group">
               <label>Password</label>
-              <input name="password" type="password" required />
+              <input id="login-password" type="password" required />
             </div>
-            <div class="btn-row">
-              <button class="btn btn-primary" type="submit" data-action="login">Đăng nhập</button>
-              <button class="btn btn-secondary" type="button" id="btn-register">Đăng ký & đăng nhập</button>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Đăng nhập</button>
+              <button type="button" class="btn btn-secondary" id="btn-register">Đăng ký</button>
             </div>
           </form>
         </div>
@@ -119,13 +136,10 @@ function renderAuthScreen(message = "") {
     `;
 
     const form = document.getElementById("login-form");
-    const btnRegister = document.getElementById("btn-register");
-
     form.addEventListener("submit", async (e) => {
         e.preventDefault();
-        const fd = new FormData(form);
-        const username = fd.get("username").trim();
-        const password = fd.get("password").trim();
+        const username = document.getElementById("login-username").value.trim();
+        const password = document.getElementById("login-password").value.trim();
         try {
             const data = await apiRequest("/api/login", {
                 method: "POST",
@@ -142,10 +156,40 @@ function renderAuthScreen(message = "") {
         }
     });
 
-    btnRegister.addEventListener("click", async () => {
-        const fd = new FormData(form);
-        const username = fd.get("username").trim();
-        const password = fd.get("password").trim();
+    const btnRegister = document.getElementById("btn-register");
+    btnRegister.addEventListener("click", () => renderRegisterScreen());
+}
+
+function renderRegisterScreen(message = "") {
+    const app = document.getElementById("app");
+    app.innerHTML = `
+      <div class="auth-wrapper">
+        <div class="auth-panel">
+          <h1>Register</h1>
+          ${message ? `<p class="status">${message}</p>` : ""}
+          <form id="register-form">
+            <div class="form-group">
+              <label>Username</label>
+              <input id="reg-username" type="text" required />
+            </div>
+            <div class="form-group">
+              <label>Password</label>
+              <input id="reg-password" type="password" required />
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Đăng ký</button>
+              <button type="button" class="btn btn-secondary" id="btn-back">Quay lại</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+
+    const form = document.getElementById("register-form");
+    form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const username = document.getElementById("reg-username").value.trim();
+        const password = document.getElementById("reg-password").value.trim();
         try {
             const data = await apiRequest("/api/register", {
                 method: "POST",
@@ -158,9 +202,12 @@ function renderAuthScreen(message = "") {
             localStorage.setItem("username", currentUsername);
             afterLogin();
         } catch (err) {
-            renderAuthScreen("Register failed: " + err.message);
+            renderRegisterScreen("Register failed: " + err.message);
         }
     });
+
+    const btnBack = document.getElementById("btn-back");
+    btnBack.addEventListener("click", () => renderAuthScreen());
 }
 
 function afterLogin() {
@@ -207,15 +254,14 @@ function renderDashboard() {
                 class="input"
                 style="width:130px;margin-right:8px;"
               >
-                <option value="1s">1 giây</option>
-                <option value="1m">1 phút</option>
-                <option value="5m">5 phút</option>
-                <option value="15m">15 phút</option>
-                <option value="1h">1 giờ</option>
-                <option value="4h">4 giờ</option>
-                <option value="1d">1 ngày</option>
+                <option value="1s">1s (ticker)</option>
+                <option value="1m">1m (nến)</option>
+                <option value="5m">5m</option>
+                <option value="15m">15m</option>
+                <option value="1h">1h</option>
+                <option value="4h">4h</option>
+                <option value="1d">1d</option>
               </select>
-              <button class="btn btn-secondary" id="btn-apply-symbol">Đổi coin</button>
               <button class="btn btn-secondary" id="btn-bot-start">Start bot</button>
               <button class="btn btn-secondary" id="btn-bot-stop">Stop bot</button>
             </div>
@@ -257,25 +303,14 @@ function renderDashboard() {
         }
     });
 
-    // 👇 THÊM MỚI
     const symbolInput = document.getElementById("symbol-input");
-    const btnApplySymbol = document.getElementById("btn-apply-symbol");
     const intervalSelect = document.getElementById("interval-select");
 
     if (symbolInput) {
-        symbolInput.value = currentSymbol || "BTCUSDT";
-    }
-    if (intervalSelect) {
-        intervalSelect.value = currentInterval || "1s";
-    }
-
-    if (btnApplySymbol && symbolInput) {
-        btnApplySymbol.addEventListener("click", () => {
-            const sym = symbolInput.value.trim().toUpperCase();
-            if (!sym) return;
+        symbolInput.addEventListener("change", () => {
+            const sym = symbolInput.value.trim().toUpperCase() || "BTCUSDT";
             currentSymbol = sym;
 
-            // reset dữ liệu chart khi đổi coin
             priceData = [];
             labelData = [];
             if (priceChart) {
@@ -289,11 +324,11 @@ function renderDashboard() {
     }
 
     if (intervalSelect) {
+        intervalSelect.value = currentInterval || "1s";
         intervalSelect.addEventListener("change", () => {
             const tf = intervalSelect.value || "1s";
             currentInterval = tf;
 
-            // reset dữ liệu chart khi đổi khung thời gian
             priceData = [];
             labelData = [];
             if (priceChart) {
@@ -305,228 +340,11 @@ function renderDashboard() {
             connectPriceWS();
         });
     }
-    // 👆 HẾT PHẦN THÊM
 
     initChart();
-    connectPriceWS();  // kết nối WS giá với currentSymbol & currentInterval
+    connectPriceWS();
     connectPnlWS();
     loadBotStatus();
-}
-
-// ================= Cấu hình bot =================
-async function renderConfigScreen(message = "") {
-    renderBaseLayout(`
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Cấu hình Bot</h2>
-          <p>Thiết lập chiến lược & thông số để BotManager (trading_bot_lib) sử dụng.</p>
-        </div>
-        <div class="panel-body">
-          ${message ? `<p class="status">${message}</p>` : ""}
-          <form id="config-form" class="form">
-            <div class="form-group">
-              <label>Chế độ bot</label>
-              <select name="bot_mode">
-                <option value="static">Static (1 coin cố định)</option>
-                <option value="dynamic">Dynamic (tự quét nhiều coin)</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>Symbol (nếu static)</label>
-              <input type="text" name="symbol" placeholder="BTCUSDT" />
-            </div>
-            <div class="form-group">
-              <label>Đòn bẩy (lev)</label>
-              <input type="number" name="lev" value="10" />
-            </div>
-            <div class="form-group">
-              <label>% vốn mỗi lệnh</label>
-              <input type="number" name="percent" value="5" />
-            </div>
-            <div class="form-group">
-              <label>Take Profit (%)</label>
-              <input type="number" name="tp" value="10" />
-            </div>
-            <div class="form-group">
-              <label>Stop Loss (%)</label>
-              <input type="number" name="sl" value="20" />
-            </div>
-            <div class="form-group">
-              <label>ROI Trigger (%) (optional)</label>
-              <input type="number" name="roi_trigger" placeholder="VD: 5" />
-            </div>
-            <div class="form-group">
-              <label>Số bot / số coin tối đa</label>
-              <input type="number" name="bot_count" value="1" />
-            </div>
-            <button class="btn btn-primary" type="submit">Lưu config</button>
-          </form>
-        </div>
-      </section>
-    `);
-
-    try {
-        const cfg = await apiRequest("/api/bot-config");
-        const form = document.getElementById("config-form");
-        form.bot_mode.value = cfg.bot_mode || "static";
-        form.symbol.value = cfg.symbol || "";
-        form.lev.value = cfg.lev ?? 10;
-        form.percent.value = cfg.percent ?? 5;
-        form.tp.value = cfg.tp ?? 10;
-        form.sl.value = cfg.sl ?? 20;
-        form.roi_trigger.value = cfg.roi_trigger ?? "";
-        form.bot_count.value = cfg.bot_count ?? 1;
-    } catch (err) {
-        console.error("Load config error:", err);
-    }
-
-    const form = document.getElementById("config-form");
-    form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const fd = new FormData(form);
-        const payload = {
-            bot_mode: fd.get("bot_mode"),
-            symbol: fd.get("symbol") || null,
-            lev: Number(fd.get("lev") || 10),
-            percent: Number(fd.get("percent") || 5),
-            tp: Number(fd.get("tp") || 10),
-            sl: Number(fd.get("sl") || 20),
-            roi_trigger: fd.get("roi_trigger")
-                ? Number(fd.get("roi_trigger"))
-                : null,
-            bot_count: Number(fd.get("bot_count") || 1),
-        };
-        try {
-            await apiRequest("/api/bot-config", {
-                method: "POST",
-                body: payload,
-            });
-            renderConfigScreen("Đã lưu cấu hình.");
-        } catch (err) {
-            renderConfigScreen("Lỗi lưu cấu hình: " + err.message);
-        }
-    });
-}
-
-// ================= API Key screen =================
-async function renderApiKeyScreen(message = "") {
-    renderBaseLayout(`
-      <section class="panel">
-        <div class="panel-header">
-          <h2>API Binance</h2>
-          <p>Nhập API Key/Secret của bạn (khuyến nghị dùng tài khoản testnet nếu có).</p>
-        </div>
-        <div class="panel-body">
-          ${message ? `<p class="status">${message}</p>` : ""}
-          <form id="apikey-form" class="form">
-            <div class="form-group">
-              <label>API Key</label>
-              <input name="api_key" required />
-            </div>
-            <div class="form-group">
-              <label>API Secret</label>
-              <input name="api_secret" type="password" required />
-            </div>
-            <button class="btn btn-primary" type="submit">Lưu API</button>
-          </form>
-        </div>
-      </section>
-    `);
-
-    // load trạng thái
-    try {
-        const st = await apiRequest("/api/setup-account");
-        if (st.has_api) {
-            const form = document.getElementById("apikey-form");
-            form.api_key.placeholder = "(đã có API key)";
-        }
-    } catch (err) {
-        console.error("Load setup-account error", err);
-    }
-
-    const form = document.getElementById("apikey-form");
-    form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const fd = new FormData(form);
-        const api_key = fd.get("api_key").trim();
-        const api_secret = fd.get("api_secret").trim();
-
-        try {
-            await apiRequest("/api/setup-account", {
-                method: "POST",
-                body: { api_key, api_secret },
-            });
-            renderApiKeyScreen("Đã lưu API Key/Secret.");
-        } catch (err) {
-            renderApiKeyScreen("Lỗi lưu API: " + err.message);
-        }
-    });
-}
-
-// ================= Bot status =================
-async function loadBotStatus() {
-    try {
-        const st = await apiRequest("/api/bot-status");
-        const el = document.getElementById("bot-status-text");
-        if (!el) return;
-
-        if (st.running) {
-            const botCount = st.bot_count ?? 0;
-            const syms = (st.active_symbols && st.active_symbols.length)
-                ? st.active_symbols.join(", ")
-                : (st.symbol || "auto");
-
-            let html =
-                `Bot đang chạy | bots: ${botCount} | symbols: ${syms} | mode: ${st.mode}`;
-
-            // Nếu backend trả về danh sách từng bot
-            if (st.bots && Array.isArray(st.bots) && st.bots.length > 0) {
-                html += '<ul class="bot-list">';
-                for (const b of st.bots) {
-                    const bSyms = (b.active_symbols && b.active_symbols.length)
-                        ? b.active_symbols.join(", ")
-                        : (b.symbol || "auto");
-                    const bStatus = b.status || "unknown";
-                    const strategy = b.strategy || "";
-                    html += `
-<li>
-  <b>${b.id}</b>
-  ${strategy ? ` | ${strategy}` : ""}
-  | symbols: ${bSyms}
-  | status: ${bStatus}
-  <button class="btn btn-xs btn-danger btn-stop-one" data-bot-id="${b.id}">Dừng bot này</button>
-</li>`;
-                }
-                html += "</ul>";
-            }
-
-            el.innerHTML = html;
-            el.className = "status ok";
-
-            // Gắn sự kiện dừng từng bot
-            document.querySelectorAll(".btn-stop-one").forEach((btn) => {
-                btn.addEventListener("click", async () => {
-                    const botId = btn.getAttribute("data-bot-id");
-                    if (!botId) return;
-                    if (!confirm(`Dừng bot ${botId}?`)) return;
-                    try {
-                        await apiRequest("/api/bot-stop-one", {
-                            method: "POST",
-                            body: { bot_id: botId },
-                        });
-                        loadBotStatus();
-                    } catch (err) {
-                        alert("Lỗi dừng bot: " + err.message);
-                    }
-                });
-            });
-        } else {
-            el.textContent = `Bot đang tắt. (mode: ${st.mode}, symbol: ${st.symbol || "auto"})`;
-            el.className = "status";
-        }
-    } catch (err) {
-        console.error("Load bot status error", err);
-    }
 }
 
 // ================= Chart =================
@@ -545,15 +363,15 @@ function initChart() {
                 {
                     label: "Price",
                     data: priceData,
-                    borderWidth: 1,
+                    borderWidth: 2,
+                    tension: 0.2,
                     pointRadius: 0,
-                    tension: 0.1,
                 },
             ],
         },
         options: {
             responsive: true,
-            animation: false,
+            maintainAspectRatio: false,
             scales: {
                 x: {
                     display: true,
@@ -563,6 +381,9 @@ function initChart() {
                 },
             },
             plugins: {
+                legend: {
+                    display: false,
+                },
                 title: {
                     display: true,
                     text: currentSymbol + " (" + currentInterval + ")",
@@ -586,9 +407,12 @@ function connectPriceWS() {
         ws = null;
     }
 
-    const url = (location.protocol === "https:" ? "wss://" : "ws://") +
+    const url =
+        (location.protocol === "https:" ? "wss://" : "ws://") +
         location.host +
-        `/ws/price?token=${encodeURIComponent(authToken)}&symbol=${encodeURIComponent(currentSymbol)}&interval=${encodeURIComponent(currentInterval)}`;
+        `/ws/price?token=${encodeURIComponent(authToken)}&symbol=${encodeURIComponent(
+            currentSymbol
+        )}&interval=${encodeURIComponent(currentInterval)}`;
 
     ws = new WebSocket(url);
     ws.onopen = () => {
@@ -609,7 +433,6 @@ function connectPriceWS() {
 
             priceData.push(data.price);
             const t = new Date(data.timestamp * 1000);
-            // hiển thị theo kiểu HH:MM (nếu khung >= 1m thì giây không quan trọng)
             const label =
                 `${t.getHours()}:${String(t.getMinutes()).padStart(2, "0")}` +
                 (currentInterval === "1s"
@@ -638,7 +461,9 @@ function connectPriceWS() {
 }
 
 function connectPnlWS() {
-    const url = (location.protocol === "https:" ? "wss://" : "ws://") +
+    if (!authToken) return;
+    const url =
+        (location.protocol === "https:" ? "wss://" : "ws://") +
         location.host +
         `/ws/pnl?token=${encodeURIComponent(authToken)}`;
 
@@ -655,9 +480,9 @@ function connectPnlWS() {
                 el.textContent = "Error: " + (data.message || data.error);
                 return;
             }
-            el.textContent = `${data.balance?.toFixed
-                ? data.balance.toFixed(2)
-                : data.balance} USDT`;
+            el.textContent = `${
+                data.balance?.toFixed ? data.balance.toFixed(2) : data.balance
+            } USDT`;
         } catch (e) {
             console.error("WS pnl parse error", e);
         }
@@ -667,10 +492,173 @@ function connectPnlWS() {
     };
 }
 
+// ================= Bot status =================
+async function loadBotStatus() {
+    try {
+        const data = await apiRequest("/api/bot-status");
+        const el = document.getElementById("bot-status-text");
+        if (!el) return;
+        if (!data.running) {
+            el.textContent = "Bot đang dừng.";
+        } else {
+            el.textContent = `Bot đang chạy. Số bot: ${
+                data.bots ? data.bots.length : "?"
+            }`;
+        }
+    } catch (err) {
+        console.error("Lỗi loadBotStatus:", err);
+    }
+}
+
+// ================= Cấu hình bot =================
+async function renderConfigScreen(message = "") {
+    renderBaseLayout(`
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Cấu hình Bot</h2>
+          <p>Thiết lập chiến lược & thông số để BotManager (trading_bot_lib) sử dụng.</p>
+        </div>
+        <div class="panel-body">
+          ${message ? `<p class="status">${message}</p>` : ""}
+          <form id="config-form" class="form-grid">
+            <div class="form-group">
+              <label>Chế độ bot</label>
+              <select name="bot_mode">
+                <option value="static">Static (1 coin cố định)</option>
+                <option value="dynamic">Dynamic (tự quét nhiều coin)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Symbol (nếu static)</label>
+              <input type="text" name="symbol" placeholder="BTCUSDT" />
+            </div>
+            <div class="form-group">
+              <label>Đòn bẩy (lev)</label>
+              <input type="number" name="lev" value="10" />
+            </div>
+            <div class="form-group">
+              <label>% vốn mỗi lệnh</label>
+              <input type="number" name="percent" value="5" />
+            </div>
+            <div class="form-group">
+              <label>TP (%)</label>
+              <input type="number" name="tp" value="10" />
+            </div>
+            <div class="form-group">
+              <label>SL (%)</label>
+              <input type="number" name="sl" value="20" />
+            </div>
+            <div class="form-group">
+              <label>ROI trigger (tuỳ chọn)</label>
+              <input type="number" name="roi_trigger" placeholder="ví dụ 30" />
+            </div>
+            <div class="form-group">
+              <label>Số bot (bot_count)</label>
+              <input type="number" name="bot_count" value="1" />
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Lưu cấu hình</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    `);
+
+    try {
+        const cfg = await apiRequest("/api/bot-config");
+        const form = document.getElementById("config-form");
+        if (cfg && form) {
+            form.elements["bot_mode"].value = cfg.bot_mode || "static";
+            form.elements["symbol"].value = cfg.symbol || "BTCUSDT";
+            form.elements["lev"].value = cfg.lev ?? 10;
+            form.elements["percent"].value = cfg.percent ?? 5;
+            form.elements["tp"].value = cfg.tp ?? 10;
+            form.elements["sl"].value = cfg.sl ?? 20;
+            form.elements["roi_trigger"].value =
+                cfg.roi_trigger !== null && cfg.roi_trigger !== undefined
+                    ? cfg.roi_trigger
+                    : "";
+            form.elements["bot_count"].value = cfg.bot_count ?? 1;
+        }
+
+        form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const payload = {
+                bot_mode: form.elements["bot_mode"].value,
+                symbol: form.elements["symbol"].value.trim() || null,
+                lev: Number(form.elements["lev"].value),
+                percent: Number(form.elements["percent"].value),
+                tp: Number(form.elements["tp"].value),
+                sl: Number(form.elements["sl"].value),
+                roi_trigger: form.elements["roi_trigger"].value
+                    ? Number(form.elements["roi_trigger"].value)
+                    : null,
+                bot_count: Number(form.elements["bot_count"].value),
+            };
+            try {
+                await apiRequest("/api/bot-config", {
+                    method: "POST",
+                    body: payload,
+                });
+                renderConfigScreen("Đã lưu cấu hình.");
+            } catch (err) {
+                renderConfigScreen("Lỗi lưu cấu hình: " + err.message);
+            }
+        });
+    } catch (err) {
+        renderConfigScreen("Lỗi load cấu hình: " + err.message);
+    }
+}
+
+// ================= API KEY SCREEN =================
+async function renderApiKeyScreen(message = "") {
+    renderBaseLayout(`
+      <section class="panel">
+        <div class="panel-header">
+          <h2>API Binance</h2>
+          <p>Nhập API Key & Secret cho Binance Futures (cẩn thận không share cho ai khác).</p>
+        </div>
+        <div class="panel-body">
+          ${message ? `<p class="status">${message}</p>` : ""}
+          <form id="api-form">
+            <div class="form-group">
+              <label>API Key</label>
+              <input type="text" name="api_key" required />
+            </div>
+            <div class="form-group">
+              <label>API Secret</label>
+              <input type="password" name="api_secret" required />
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Lưu API</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    `);
+
+    const form = document.getElementById("api-form");
+    form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const api_key = form.elements["api_key"].value.trim();
+        const api_secret = form.elements["api_secret"].value.trim();
+        try {
+            await apiRequest("/api/setup-account", {
+                method: "POST",
+                body: { api_key, api_secret },
+            });
+            renderApiKeyScreen("Đã lưu API thành công.");
+        } catch (err) {
+            renderApiKeyScreen("Lỗi lưu API: " + err.message);
+        }
+    });
+}
+
 // =============== INIT ===============
 function init() {
     authToken = localStorage.getItem("authToken");
     currentUsername = localStorage.getItem("username");
+    startKeepAlive();
     if (authToken && currentUsername) afterLogin();
     else renderAuthScreen();
 }
