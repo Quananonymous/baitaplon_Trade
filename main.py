@@ -16,6 +16,7 @@ from fastapi import (
     HTTPException,
     WebSocket,
     WebSocketDisconnect,
+    Header,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
@@ -217,8 +218,11 @@ def get_bm(current: User, db):
     return bm
 
 
-def get_current_user(token: str = "", db: SessionLocal = Depends(get_db)) -> User:
-    uid = TOKEN_STORE.get(token)
+def get_current_user(
+    token: str = Header(None, alias="X-Auth-Token"),
+    db: SessionLocal = Depends(get_db),
+) -> User:
+    uid = TOKEN_STORE.get(token or "")
     if not uid:
         raise HTTPException(status_code=401, detail="Invalid token")
 
