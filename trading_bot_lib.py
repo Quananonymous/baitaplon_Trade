@@ -1,4 +1,3 @@
-# trading_bot_lib_complete.py
 import json
 import hmac
 import hashlib
@@ -8,19 +7,18 @@ import logging
 import traceback
 import random
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Set
 
 import requests
 import websocket
 
-# ----------------- LOGGER CẤU HÌNH ----------------- #
+# ----------------- LOGGER ----------------- #
 
 logger = logging.getLogger("trading_bot_lib")
 logger.setLevel(logging.DEBUG)
 
 if not logger.handlers:
-    # Console handler với format chi tiết
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG)
     console_formatter = logging.Formatter(
@@ -30,32 +28,27 @@ if not logger.handlers:
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 
-# ----------------- CẤU HÌNH HỆ THỐNG ----------------- #
+# ----------------- CẤU HÌNH ----------------- #
 
 BINANCE_API_URL = "https://fapi.binance.com"
 TELEGRAM_API_URL = "https://api.telegram.org"
 
-# Cấu hình hệ thống tìm coin theo volume
 MIN_24H_VOLUME_USDC = 500_000  # USDC
 EXCLUDED_SYMBOLS = {"BTCDOMUSDC", "USDCUSDC", "BUSDUSDC", "FDUSDUSDC", "TUSDTUSDC"}
 
-# Thời gian timeout request
 REQUEST_TIMEOUT = 10
 WS_RECONNECT_DELAY = 5
 
-# Cache USDC markets
 _USDC_CACHE = {"last_update": 0, "symbols": []}
-_USDC_CACHE_TTL = 60  # seconds
+_USDC_CACHE_TTL = 60
 
-# Cache 24h ticker
 _TICKER_CACHE = {"last_update": 0, "data": {}}
 _TICKER_CACHE_TTL = 30
 
-# ----------------- HÀM TIỆN ÍCH CHUNG ----------------- #
 
+# ----------------- HÀM TIỆN ÍCH BINANCE ----------------- #
 
 def _sign(params: Dict[str, Any], secret_key: str) -> str:
-    """Tạo chữ ký HMAC SHA256 cho request Binance."""
     query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
     return hmac.new(secret_key.encode(), query.encode(), hashlib.sha256).hexdigest()
 
@@ -69,7 +62,6 @@ def _binance_request(
     signed: bool = False,
     base_url: str = BINANCE_API_URL,
 ) -> Dict[str, Any]:
-    """Gửi request REST tới Binance Futures."""
     url = base_url + path
     headers = {"X-MBX-APIKEY": api_key} if api_key else {}
     params = params or {}
@@ -109,13 +101,10 @@ def send_telegram(
     reply_markup: Optional[Dict[str, Any]] = None,
     default_chat_id: Optional[str] = None,
 ) -> None:
-    """Gửi message tới Telegram."""
     if not bot_token:
         return
-
     if not chat_id:
         chat_id = default_chat_id
-
     if not chat_id:
         return
 
@@ -132,66 +121,55 @@ def send_telegram(
         logger.error(f"Lỗi gửi Telegram: {e}")
 
 
-# ========== FRONTEND EVENT BUS (GỬI DATA RA WEB) ==========
-
+# ----------------- FRONTEND EVENT BUS ----------------- #
 
 class FrontendEventBus:
     """
-    EventBus đơn giản để backend/web đọc log + dữ liệu realtime.
-
-    - publish(event): đẩy event (dict) vào hàng đợi + gọi các subscriber.
-    - get_recent(limit): lấy list event mới nhất (để REST API trả về).
-    - subscribe(callback): (option) cho WebSocket hoặc worker khác nghe realtime.
+    EventBus để backend/frontend đọc log + dữ liệu realtime.
     """
 
-    def __init__(self, max_events=1000):
+    def __init__(self, max_events: int = 1000):
         self._events: List[Dict[str, Any]] = []
         self._subscribers: List[Any] = []
         self._lock = threading.Lock()
         self.max_events = max_events
 
-    def publish(self, event: dict):
+    def publish(self, event: Dict[str, Any]) -> None:
         if not isinstance(event, dict):
             return
         event.setdefault("timestamp", time.time())
-
         with self._lock:
             self._events.append(event)
             if len(self._events) > self.max_events:
-                # chỉ giữ lại N event gần nhất
-                self._events = self._events[-self.max_events :]
-            subscribers = list(self._subscribers)
-
-        for cb in subscribers:
+                self._events = self._events[-self.max_events:]
+            subs = list(self._subscribers)
+        for cb in subs:
             try:
                 cb(event)
             except Exception as e:
                 logger.error(f"FrontendEventBus subscriber error: {e}")
 
-    def get_recent(self, limit: int = 200):
+    def get_recent(self, limit: int = 200) -> List[Dict[str, Any]]:
         with self._lock:
             if limit <= 0:
                 return []
             return self._events[-limit:].copy()
 
-    def subscribe(self, callback):
+    def subscribe(self, callback) -> None:
         if not callable(callback):
             return
         with self._lock:
             self._subscribers.append(callback)
 
 
-# Event bus global để backend import dùng luôn
 GLOBAL_EVENT_BUS = FrontendEventBus()
 
-# ----------------- QUẢN LÝ WEBSOCKET ----------------- #
 
+# ----------------- WEBSOCKET QUẢN LÝ GIÁ REALTIME ----------------- #
 
 class WebSocketManager:
     """
-    Quản lý nhiều WebSocket tới Binance để lấy giá realtime.
-    - Mỗi symbol 1 connection.
-    - Tự reconnect nếu mất.
+    Mỗi symbol 1 WebSocket kline_1m, đẩy giá realtime cho bot.
     """
 
     def __init__(self):
@@ -219,7 +197,7 @@ class WebSocketManager:
                     except Exception as e:
                         logger.error(f"Lỗi callback price {symbol}: {e}")
             except Exception as e:
-                logger.error(f"Lỗi parse message WS {symbol}: {e}")
+                logger.error(f"Lỗi parse WS {symbol}: {e}")
 
         def on_error(ws, error):
             logger.error(f"WS error [{symbol}]: {error}")
@@ -242,16 +220,14 @@ class WebSocketManager:
                     self.connections[symbol] = ws
                 ws.run_forever()
             except Exception as e:
-                logger.error(f"Lỗi WS connection cho {symbol}: {e}")
+                logger.error(f"Lỗi WS cho {symbol}: {e}")
             finally:
                 with self.lock:
-                    if symbol in self.connections:
-                        del self.connections[symbol]
+                    self.connections.pop(symbol, None)
                 if self.running:
                     time.sleep(WS_RECONNECT_DELAY)
 
-    def subscribe_price(self, symbol: str, callback):
-        """Đăng ký callback nhận giá realtime của symbol."""
+    def subscribe_price(self, symbol: str, callback) -> None:
         with self.lock:
             self.callbacks[symbol].append(callback)
             if symbol not in self.threads:
@@ -259,16 +235,15 @@ class WebSocketManager:
                 self.threads[symbol] = t
                 t.start()
 
-    def unsubscribe_price(self, symbol: str, callback):
-        """Hủy đăng ký callback."""
+    def unsubscribe_price(self, symbol: str, callback) -> None:
         with self.lock:
             if symbol in self.callbacks and callback in self.callbacks[symbol]:
                 self.callbacks[symbol].remove(callback)
 
-    def stop(self):
+    def stop(self) -> None:
         self.running = False
         with self.lock:
-            for sym, ws in list(self.connections.items()):
+            for ws in self.connections.values():
                 try:
                     ws.close()
                 except Exception:
@@ -276,11 +251,9 @@ class WebSocketManager:
             self.connections.clear()
 
 
-# ----------------- HÀM LẤY DỮ LIỆU BINANCE ----------------- #
-
+# ----------------- CÁC HÀM LẤY DỮ LIỆU TỪ BINANCE ----------------- #
 
 def get_usdc_futures_symbols() -> List[str]:
-    """Lấy danh sách futures symbol kết với USDC, cache để giảm request."""
     now = time.time()
     if now - _USDC_CACHE["last_update"] < _USDC_CACHE_TTL and _USDC_CACHE["symbols"]:
         return _USDC_CACHE["symbols"]
@@ -297,25 +270,18 @@ def get_usdc_futures_symbols() -> List[str]:
         _USDC_CACHE["last_update"] = now
         return symbols
     except Exception as e:
-        logger.error(f"❌ Lỗi lấy danh sách coin từ Binance: {e}")
+        logger.error(f"❌ Lỗi lấy danh sách coin: {e}")
         return _USDC_CACHE.get("symbols", [])
 
 
 def get_24h_tickers() -> Dict[str, Dict[str, Any]]:
-    """
-    Lấy 24h tickers (giá, volume, v.v.), cache vài chục giây.
-    Trả về dict {symbol: ticker_data}.
-    """
     now = time.time()
     if now - _TICKER_CACHE["last_update"] < _TICKER_CACHE_TTL and _TICKER_CACHE["data"]:
         return _TICKER_CACHE["data"]
 
     try:
         data = _binance_request("GET", "/fapi/v1/ticker/24hr")
-        result = {}
-        for item in data:
-            symbol = item.get("symbol")
-            result[symbol] = item
+        result = {item.get("symbol"): item for item in data}
         _TICKER_CACHE["data"] = result
         _TICKER_CACHE["last_update"] = now
         return result
@@ -325,13 +291,8 @@ def get_24h_tickers() -> Dict[str, Dict[str, Any]]:
 
 
 def get_top_usdc_symbols_by_volume(limit: int = 20) -> List[str]:
-    """
-    Lấy danh sách symbol USDC volume lớn nhất trong 24h.
-    Chỉ dùng cho cơ chế tìm coin thông minh.
-    """
     usdc_symbols = set(get_usdc_futures_symbols())
     tickers = get_24h_tickers()
-
     pairs = []
     for symbol, data in tickers.items():
         if symbol in usdc_symbols:
@@ -341,14 +302,11 @@ def get_top_usdc_symbols_by_volume(limit: int = 20) -> List[str]:
                     pairs.append((symbol, vol))
             except Exception:
                 continue
-
     pairs.sort(key=lambda x: x[1], reverse=True)
-    top_symbols = [s for s, _ in pairs[:limit]]
-    return top_symbols
+    return [s for s, _ in pairs[:limit]]
 
 
 def get_current_price(symbol: str) -> float:
-    """Lấy giá hiện tại của symbol qua REST."""
     try:
         data = _binance_request("GET", "/fapi/v1/ticker/price", params={"symbol": symbol})
         return float(data["price"])
@@ -357,7 +315,6 @@ def get_current_price(symbol: str) -> float:
 
 
 def get_balance(api_key: str, api_secret: str, asset: str = "USDC") -> float:
-    """Lấy số dư Futures của 1 loại tài sản."""
     data = _binance_request(
         "GET", "/fapi/v2/balance", api_key=api_key, api_secret=api_secret, signed=True
     )
@@ -371,7 +328,6 @@ def get_balance(api_key: str, api_secret: str, asset: str = "USDC") -> float:
 
 
 def set_leverage(api_key: str, api_secret: str, symbol: str, leverage: int) -> None:
-    """Đặt đòn bẩy cho 1 symbol."""
     leverage = max(1, min(leverage, 125))
     try:
         _binance_request(
@@ -398,7 +354,6 @@ def _futures_order(
     order_type: str = "MARKET",
     reduce_only: bool = False,
 ) -> Dict[str, Any]:
-    """Tạo order Futures (MARKET)."""
     params = {
         "symbol": symbol,
         "side": side,
@@ -417,31 +372,7 @@ def _futures_order(
     )
 
 
-def get_open_positions(api_key: str, api_secret: str) -> List[Dict[str, Any]]:
-    """Lấy danh sách vị thế đang mở."""
-    data = _binance_request(
-        "GET",
-        "/fapi/v2/positionRisk",
-        api_key=api_key,
-        api_secret=api_secret,
-        signed=True,
-    )
-    positions = []
-    for pos in data:
-        try:
-            position_amt = float(pos.get("positionAmt", 0))
-            if abs(position_amt) > 0:
-                positions.append(pos)
-        except Exception:
-            continue
-    return positions
-
-
 def get_symbol_precision(symbol: str) -> Dict[str, Any]:
-    """
-    Lấy thông tin precision cho symbol: stepSize, tickSize.
-    Hệ thống sẽ cần để làm tròn quantity / price.
-    """
     data = _binance_request("GET", "/fapi/v1/exchangeInfo")
     for s in data.get("symbols", []):
         if s.get("symbol") == symbol:
@@ -470,7 +401,6 @@ def get_symbol_precision(symbol: str) -> Dict[str, Any]:
 
 
 def round_quantity(symbol: str, qty: float) -> float:
-    """Làm tròn quantity theo stepSize của symbol."""
     info = get_symbol_precision(symbol)
     step = info.get("stepSize", 0.001)
     if step <= 0:
@@ -478,23 +408,41 @@ def round_quantity(symbol: str, qty: float) -> float:
     return (qty // step) * step
 
 
-# ----------------- COIN MANAGER & QUEUE CƠ CHẾ ----------------- #
+def get_klines(symbol: str, interval: str = "1m", limit: int = 60) -> List[Dict[str, Any]]:
+    """
+    Lấy dữ liệu nến (OHLC) để vẽ biểu đồ.
+    limit: 20–60 tuỳ frontend request.
+    """
+    limit = max(20, min(limit, 100))
+    data = _binance_request(
+        "GET",
+        "/fapi/v1/klines",
+        params={"symbol": symbol, "interval": interval, "limit": limit},
+    )
+    result = []
+    for k in data:
+        result.append(
+            {
+                "open_time": k[0],
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
+                "volume": float(k[5]),
+            }
+        )
+    return result
 
+
+# ----------------- COIN MANAGER & QUEUE ----------------- #
 
 class CoinManager:
-    """
-    Quản lý việc chọn coin trên toàn hệ thống:
-    - Lưu trạng thái coin đang được bot nào sử dụng.
-    - Tránh đụng coin giữa các bot.
-    """
-
     def __init__(self):
         self.lock = threading.Lock()
         self.symbol_to_bot: Dict[str, str] = {}
         self.bot_to_symbols: Dict[str, Set[str]] = defaultdict(set)
 
     def acquire_symbol(self, bot_id: str, symbol: str) -> bool:
-        """Bot yêu cầu sử dụng symbol. Trả về True nếu thành công."""
         with self.lock:
             if symbol in self.symbol_to_bot:
                 return False
@@ -503,7 +451,6 @@ class CoinManager:
             return True
 
     def release_symbol(self, bot_id: str, symbol: str) -> None:
-        """Bot trả lại symbol khi không dùng nữa."""
         with self.lock:
             if self.symbol_to_bot.get(symbol) == bot_id:
                 del self.symbol_to_bot[symbol]
@@ -511,7 +458,6 @@ class CoinManager:
                 self.bot_to_symbols[bot_id].remove(symbol)
 
     def release_all_for_bot(self, bot_id: str) -> None:
-        """Bot dừng -> trả lại toàn bộ coin của nó."""
         with self.lock:
             symbols = list(self.bot_to_symbols.get(bot_id, set()))
             for sym in symbols:
@@ -526,9 +472,7 @@ class CoinManager:
 
 class BotExecutionCoordinator:
     """
-    Điều phối thứ tự tìm coin của các bot theo cơ chế FIFO:
-    - Chỉ cho phép 1 bot được "tìm coin" tại 1 thời điểm.
-    - Các bot khác phải xếp hàng.
+    FIFO: tại 1 thời điểm chỉ 1 bot được quyền "tìm coin".
     """
 
     def __init__(self):
@@ -536,13 +480,9 @@ class BotExecutionCoordinator:
         self.condition = threading.Condition(self.lock)
         self.current_bot_id: Optional[str] = None
         self.queue: deque = deque()
-        self.bot_status: Dict[str, str] = {}  # idle / waiting / active
+        self.bot_status: Dict[str, str] = {}
 
     def request_turn(self, bot_id: str) -> None:
-        """
-        Bot yêu cầu quyền tìm coin.
-        Sẽ block cho đến khi tới lượt nó.
-        """
         with self.lock:
             if bot_id not in self.bot_status:
                 self.bot_status[bot_id] = "idle"
@@ -551,7 +491,6 @@ class BotExecutionCoordinator:
             self.bot_status[bot_id] = "waiting"
 
             while True:
-                # nếu không có bot active và bot_id đứng đầu queue => được vào
                 if self.current_bot_id is None and self.queue and self.queue[0] == bot_id:
                     self.current_bot_id = bot_id
                     self.queue.popleft()
@@ -560,9 +499,6 @@ class BotExecutionCoordinator:
                 self.condition.wait()
 
     def release_turn(self, bot_id: str) -> None:
-        """
-        Bot trả lại quyền sau khi tìm coin xong (dù thành công hay không).
-        """
         with self.lock:
             if self.current_bot_id == bot_id:
                 self.current_bot_id = None
@@ -570,14 +506,12 @@ class BotExecutionCoordinator:
                 self.condition.notify_all()
 
     def unregister_bot(self, bot_id: str) -> None:
-        """Gọi khi bot dừng hẳn, remove khỏi queue và trạng thái."""
         with self.lock:
             self.queue = deque([b for b in self.queue if b != bot_id])
             if self.current_bot_id == bot_id:
                 self.current_bot_id = None
                 self.condition.notify_all()
-            if bot_id in self.bot_status:
-                del self.bot_status[bot_id]
+            self.bot_status.pop(bot_id, None)
 
     def get_queue_info(self) -> Dict[str, Any]:
         with self.lock:
@@ -588,35 +522,28 @@ class BotExecutionCoordinator:
             }
 
 
-# ----------------- BASE BOT CLASS ----------------- #
-
+# ----------------- BASE BOT ----------------- #
 
 class BaseBot:
-    """
-    Lớp bot cơ sở:
-    - Quản lý vị thế cho 1 hoặc nhiều symbol.
-    - Có cơ chế nhồi lệnh, TP/SL, đảo chiều.
-    """
-
     def __init__(
         self,
-        symbol,
-        lev,
-        percent,
-        tp,
-        sl,
-        roi_trigger,
-        ws_manager,
-        api_key,
-        api_secret,
-        telegram_bot_token,
-        telegram_chat_id,
-        strategy_name,
-        config_key=None,
-        bot_id=None,
-        coin_manager=None,
-        symbol_locks=None,
-        max_coins=1,
+        symbol: str,
+        lev: int,
+        percent: float,
+        tp: Optional[float],
+        sl: Optional[float],
+        roi_trigger: Optional[float],
+        ws_manager: WebSocketManager,
+        api_key: str,
+        api_secret: str,
+        telegram_bot_token: Optional[str],
+        telegram_chat_id: Optional[str],
+        strategy_name: str,
+        config_key: Optional[str] = None,
+        bot_id: Optional[str] = None,
+        coin_manager: Optional[CoinManager] = None,
+        symbol_locks: Optional[Dict[str, threading.Lock]] = None,
+        max_coins: int = 1,
         bot_coordinator: Optional[BotExecutionCoordinator] = None,
         event_bus: Optional[FrontendEventBus] = None,
     ):
@@ -643,7 +570,6 @@ class BaseBot:
         self.max_coins = max_coins
         self.bot_coordinator = bot_coordinator
 
-        # Dữ liệu per-symbol
         self.symbol_data: Dict[str, Dict[str, Any]] = defaultdict(
             lambda: {
                 "position_open": False,
@@ -661,22 +587,14 @@ class BaseBot:
         )
         self.active_symbols: Set[str] = set()
 
-        # Trạng thái bot
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self.lock = threading.Lock()
-        self.status = "stopped"  # running / stopped / error
+        self.status = "stopped"
 
-    # ----------------- LOG & TELEGRAM ----------------- #
+    # ---- LOG ---- #
 
-    def log(self, message, level="info"):
-        """
-        Gửi log ra:
-        - logger (file + console)
-        - Telegram (nếu có token)
-        - FrontendEventBus (để web đọc)
-        """
-        # 1) Gửi ra FrontendEventBus cho web
+    def log(self, message: str, level: str = "info") -> None:
         if self.event_bus:
             self.event_bus.publish(
                 {
@@ -689,16 +607,14 @@ class BaseBot:
                 }
             )
 
-        # 2) Log ra file / console như cũ
         important_keywords = ["❌", "✅", "⛔", "💰", "📈", "📊", "🎯", "🛡️", "🔴", "🟢", "⚠️", "🚫"]
         log_text = f"[{self.bot_id}] {message}"
 
-        if any(keyword in message for keyword in important_keywords):
+        if any(k in message for k in important_keywords):
             logger.warning(log_text)
         else:
             logger.info(log_text)
 
-        # 3) (Option) Gửi Telegram nếu bạn vẫn muốn dùng Telegram song song
         if self.telegram_bot_token and self.telegram_chat_id:
             try:
                 send_telegram(
@@ -709,13 +625,12 @@ class BaseBot:
             except Exception as e:
                 logger.error(f"Telegram log error: {e}")
 
-    # ----------------- QUẢN LÝ VỊ THẾ ----------------- #
+    # ---- PRICE UPDATE ---- #
 
-    def _handle_price_update(self, price, symbol):
+    def _handle_price_update(self, price: float, symbol: str) -> None:
         if symbol in self.symbol_data:
             self.symbol_data[symbol]["current_price"] = price
 
-        # Đẩy ra frontend để vẽ chart realtime (option)
         if self.event_bus:
             self.event_bus.publish(
                 {
@@ -726,33 +641,29 @@ class BaseBot:
                 }
             )
 
-    def _subscribe_symbol(self, symbol: str):
-        """Đăng ký WebSocket price cho symbol."""
+    def _subscribe_symbol(self, symbol: str) -> None:
         self.ws_manager.subscribe_price(symbol, self._handle_price_update)
 
-    def _unsubscribe_symbol(self, symbol: str):
-        """Hủy đăng ký WebSocket price cho symbol."""
+    def _unsubscribe_symbol(self, symbol: str) -> None:
         self.ws_manager.unsubscribe_price(symbol, self._handle_price_update)
 
-    def open_position(self, symbol: str, side: str):
-        """
-        Mở vị thế cho symbol với phần trăm vốn (self.percent).
-        side: LONG / SHORT
-        """
+    # ---- VỊ THẾ ---- #
+
+    def open_position(self, symbol: str, side: str) -> None:
         with self.symbol_locks[symbol]:
             data = self.symbol_data[symbol]
             if data["position_open"]:
-                self.log(f"⛔ {symbol}: Đã có vị thế, không mở thêm", "warning")
+                self.log(f"⛔ {symbol}: Đã có vị thế", "warning")
                 return
 
             balance = get_balance(self.api_key, self.api_secret)
             if balance <= 0:
-                self.log("❌ Không đủ số dư để mở vị thế", "error")
+                self.log("❌ Không đủ số dư", "error")
                 return
 
             price = get_current_price(symbol)
             if price <= 0:
-                self.log(f"❌ Không lấy được giá {symbol} để mở lệnh", "error")
+                self.log(f"❌ Không lấy được giá {symbol}", "error")
                 return
 
             trade_value = balance * (self.percent / 100.0) * self.lev
@@ -765,7 +676,7 @@ class BaseBot:
             try:
                 set_leverage(self.api_key, self.api_secret, symbol, self.lev)
             except Exception:
-                self.log(f"⚠️ Không đặt được leverage cho {symbol}, vẫn tiếp tục", "warning")
+                self.log(f"⚠️ Không đặt được leverage cho {symbol}", "warning")
 
             side_map = {"LONG": ("BUY", "LONG"), "SHORT": ("SELL", "SHORT")}
             if side not in side_map:
@@ -774,7 +685,7 @@ class BaseBot:
 
             order_side, position_side = side_map[side]
             try:
-                order = _futures_order(
+                _futures_order(
                     side=order_side,
                     position_side=position_side,
                     symbol=symbol,
@@ -801,8 +712,7 @@ class BaseBot:
             except Exception as e:
                 self.log(f"❌ Lỗi mở vị thế {side} {symbol}: {e}", "error")
 
-    def close_position(self, symbol: str):
-        """Đóng vị thế hiện tại của symbol."""
+    def close_position(self, symbol: str) -> None:
         with self.symbol_locks[symbol]:
             data = self.symbol_data[symbol]
             if not data["position_open"]:
@@ -810,12 +720,11 @@ class BaseBot:
 
             side = data["side"]
             if side not in ("LONG", "SHORT"):
-                self.log(f"⚠️ close_position: side không hợp lệ {side} cho {symbol}", "warning")
+                self.log(f"⚠️ close_position: side không hợp lệ {side}", "warning")
                 return
 
             qty = data["qty"]
             if qty <= 0:
-                self.log(f"⚠️ close_position: qty 0 cho {symbol}", "warning")
                 data["position_open"] = False
                 data["status"] = "closed"
                 self.active_symbols.discard(symbol)
@@ -827,7 +736,7 @@ class BaseBot:
 
             try:
                 current_price = get_current_price(symbol)
-                entry = data["entry"] if data["entry"] else current_price
+                entry = data["entry"] or current_price
                 if entry > 0:
                     if side == "LONG":
                         roi = (current_price - entry) / entry * self.lev * 100
@@ -858,10 +767,9 @@ class BaseBot:
             except Exception as e:
                 self.log(f"❌ Lỗi đóng vị thế {side} {symbol}: {e}", "error")
 
-    # ----------------- NHỒI LỆNH / ROI ----------------- #
+    # ---- NHỒI LỆNH & TP/SL ---- #
 
-    def check_averaging_down(self, symbol: str):
-        """Kiểm tra nhồi lệnh cho 1 symbol cụ thể."""
+    def check_averaging_down(self, symbol: str) -> None:
         with self.symbol_locks[symbol]:
             data = self.symbol_data[symbol]
             if (
@@ -888,11 +796,9 @@ class BaseBot:
             else:
                 return
 
-            # Lỗ mới kích hoạt nhồi lệnh
             if roi > -5:
                 return
 
-            # Tính thêm 50% volume của vị thế hiện tại
             balance = get_balance(self.api_key, self.api_secret)
             if balance <= 0:
                 return
@@ -916,7 +822,6 @@ class BaseBot:
                     api_secret=self.api_secret,
                     reduce_only=False,
                 )
-                # Cập nhật entry mới theo trung bình giá
                 old_qty = data["qty"]
                 old_entry = data["entry"]
                 new_total_qty = old_qty + extra_qty
@@ -934,12 +839,7 @@ class BaseBot:
             except Exception as e:
                 self.log(f"❌ Lỗi nhồi lệnh {side} {symbol}: {e}", "error")
 
-    def check_tp_sl_and_reverse(self, symbol: str):
-        """
-        Kiểm tra các điều kiện TP/SL và đảo chiều.
-        - Nếu ROI >= TP và có tín hiệu đảo chiều -> đóng lệnh (và bot con lo đảo).
-        - Nếu ROI <= -SL -> cắt lỗ.
-        """
+    def check_tp_sl_and_reverse(self, symbol: str) -> None:
         with self.symbol_locks[symbol]:
             data = self.symbol_data[symbol]
             if not data["position_open"] or not data["entry"]:
@@ -956,76 +856,68 @@ class BaseBot:
             else:
                 roi = (entry - current_price) / entry * self.lev * 100
 
-            # cập nhật high water mark
             if roi > data["high_water_mark_roi"]:
                 data["high_water_mark_roi"] = roi
 
-            # Cắt lỗ nếu SL âm quá sâu
             if self.sl is not None and roi <= -abs(self.sl):
                 self.log(
-                    f"🛑 {symbol}: ROI={roi:.2f}% <= SL={-abs(self.sl)}%, tiến hành cắt lỗ",
+                    f"🛑 {symbol}: ROI={roi:.2f}% <= SL={-abs(self.sl)}%, cắt lỗ",
                     "warning",
                 )
                 self.close_position(symbol)
                 return
 
-            # TP logic: nếu ROI đạt ngưỡng
             if self.tp is not None and roi >= self.tp:
                 self.log(
-                    f"🎯 {symbol}: ROI={roi:.2f}% >= TP={self.tp}%, chuẩn bị chốt lời",
+                    f"🎯 {symbol}: ROI={roi:.2f}% >= TP={self.tp}%, chốt lời",
                     "info",
                 )
                 self.close_position(symbol)
 
-    # ----------------- VÒNG LẶP CHÍNH ----------------- #
+    # ---- LOOP ---- #
 
-    def find_and_set_coin(self):
-        """
-        Tìm coin mới để giao dịch.
-        Lớp con sẽ implement logic chọn coin.
-        """
+    def find_and_set_coin(self) -> None:
         raise NotImplementedError
 
-    def run(self):
-        """Vòng lặp chính của bot."""
+    def run(self) -> None:
         self.running = True
         self.status = "running"
         self.log("🟢 Bot bắt đầu chạy")
 
         try:
             while self.running:
-                # Kiểm tra TP/SL & nhồi lệnh cho từng coin đang mở
                 for symbol in list(self.active_symbols):
                     self.check_tp_sl_and_reverse(symbol)
                     self.check_averaging_down(symbol)
 
-                # Nếu chưa đủ slot coin, tìm coin mới (theo queue)
                 if len(self.active_symbols) < self.max_coins:
                     try:
                         self.find_and_set_coin()
                     except Exception as e:
-                        self.log(f"❌ Lỗi find_and_set_coin: {e}\n{traceback.format_exc()}", "error")
+                        self.log(
+                            f"❌ Lỗi find_and_set_coin: {e}\n{traceback.format_exc()}",
+                            "error",
+                        )
 
                 time.sleep(3)
         except Exception as e:
             self.status = "error"
-            self.log(f"❌ Lỗi trong vòng lặp run: {e}\n{traceback.format_exc()}", "error")
+            self.log(f"❌ Lỗi vòng lặp run: {e}\n{traceback.format_exc()}", "error")
         finally:
             self.running = False
             self.status = "stopped"
             self.log("🔴 Bot dừng chạy")
 
-    def start(self):
+    def start(self) -> None:
         if self.running:
             self.log("⚠️ Bot đã chạy rồi", "warning")
             return
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
-    def stop(self):
-        """Dừng bot, đóng tất cả vị thế và trả coin về CoinManager."""
+    def stop(self) -> None:
         self.running = False
-        self.log("⏹ Đang dừng bot, đóng toàn bộ vị thế")
+        self.log("⏹ Dừng bot, đóng toàn bộ vị thế")
         try:
             for symbol in list(self.active_symbols):
                 self.close_position(symbol)
@@ -1036,7 +928,6 @@ class BaseBot:
                 self.bot_coordinator.unregister_bot(self.bot_id)
             self.status = "stopped"
 
-    # Dùng cho dashboard
     def get_summary(self) -> Dict[str, Any]:
         return {
             "bot_id": self.bot_id,
@@ -1051,29 +942,23 @@ class BaseBot:
         }
 
 
-# ----------------- BOT CỤ THỂ: GLOBAL MARKET BOT (RSI + VOLUME QUEUE) ----------------- #
-
+# ----------------- GLOBAL MARKET BOT ----------------- #
 
 class GlobalMarketBot(BaseBot):
-    """
-    Bot quét toàn thị trường USDC, chọn coin volume lớn + tín hiệu đơn giản.
-    Kết hợp với BotExecutionCoordinator để đảm bảo FIFO giữa các bot.
-    """
-
     def __init__(
         self,
-        symbol,
-        lev,
-        percent,
-        tp,
-        sl,
-        roi_trigger,
-        ws_manager,
-        api_key,
-        api_secret,
-        telegram_bot_token,
-        telegram_chat_id,
-        bot_id=None,
+        symbol: str,
+        lev: int,
+        percent: float,
+        tp: Optional[float],
+        sl: Optional[float],
+        roi_trigger: Optional[float],
+        ws_manager: WebSocketManager,
+        api_key: str,
+        api_secret: str,
+        telegram_bot_token: Optional[str],
+        telegram_chat_id: Optional[str],
+        bot_id: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(
@@ -1094,15 +979,10 @@ class GlobalMarketBot(BaseBot):
         )
 
     def _simple_signal(self, symbol: str) -> Optional[str]:
-        """
-        Giả lập tín hiệu:
-        - Dùng 24h priceChangePercent: nếu tăng mạnh -> ưu tiên LONG, giảm mạnh -> SHORT.
-        """
         tickers = get_24h_tickers()
         t = tickers.get(symbol)
         if not t:
             return None
-
         try:
             change_percent = float(t.get("priceChangePercent", 0))
         except Exception:
@@ -1114,20 +994,11 @@ class GlobalMarketBot(BaseBot):
             return "SHORT"
         return None
 
-    def find_and_set_coin(self):
-        """
-        Cơ chế tìm coin:
-        - Xin quyền từ BotExecutionCoordinator (FIFO).
-        - Lọc top volume USDC.
-        - Bỏ coin đã đụng.
-        - Mở vị thế coin đầu tiên có tín hiệu.
-        """
+    def find_and_set_coin(self) -> None:
         if self.bot_coordinator is None:
-            # fallback: nếu không có coordinator, vẫn chọn coin nhưng không FIFO
             self._find_coin_no_queue()
             return
 
-        # Nếu đã đủ coin thì thôi
         if len(self.active_symbols) >= self.max_coins:
             return
 
@@ -1143,37 +1014,27 @@ class GlobalMarketBot(BaseBot):
             for sym in top_symbols:
                 if len(self.active_symbols) >= self.max_coins:
                     break
-
-                # Check symbol free global
                 if not self.coin_manager.is_symbol_free(sym):
                     continue
 
-                # Xem tín hiệu
                 signal = self._simple_signal(sym)
                 if not signal:
                     continue
 
-                # Acquire symbol
                 if not self.coin_manager.acquire_symbol(bot_id, sym):
                     continue
 
-                # Mở vị thế
                 self.open_position(sym, signal)
                 if sym in self.active_symbols:
                     self.log(
-                        f"🎯 Bot đã chọn coin {sym} với tín hiệu {signal}. "
-                        f"Tổng coin đang chạy: {len(self.active_symbols)}/{self.max_coins}"
+                        f"🎯 Bot chọn coin {sym} với tín hiệu {signal}. "
+                        f"Coin đang chạy: {len(self.active_symbols)}/{self.max_coins}"
                     )
         finally:
-            # Trả lại quyền quét cho bot khác
             self.bot_coordinator.release_turn(bot_id)
             self.log("🔁 Đã trả quyền tìm coin cho bot tiếp theo")
 
-    def _find_coin_no_queue(self):
-        """
-        Fallback nếu không có BotExecutionCoordinator.
-        Vẫn quét top volume nhưng không đảm bảo FIFO.
-        """
+    def _find_coin_no_queue(self) -> None:
         if len(self.active_symbols) >= self.max_coins:
             return
 
@@ -1183,7 +1044,6 @@ class GlobalMarketBot(BaseBot):
         for sym in top_symbols:
             if len(self.active_symbols) >= self.max_coins:
                 break
-
             if not self.coin_manager.is_symbol_free(sym):
                 continue
 
@@ -1197,23 +1057,14 @@ class GlobalMarketBot(BaseBot):
             self.open_position(sym, signal)
             if sym in self.active_symbols:
                 self.log(
-                    f"🎯 [NoQueue] Bot đã chọn coin {sym} với tín hiệu {signal}. "
-                    f"Tổng coin đang chạy: {len(self.active_symbols)}/{self.max_coins}"
+                    f"🎯 [NoQueue] Bot chọn coin {sym} với tín hiệu {signal}. "
+                    f"Coin đang chạy: {len(self.active_symbols)}/{self.max_coins}"
                 )
 
 
 # ----------------- BOT MANAGER ----------------- #
 
-
 class BotManager:
-    """
-    Quản lý nhiều bot:
-    - Khởi tạo / dừng / stop_all.
-    - Dùng BotExecutionCoordinator để hàng đợi tìm coin.
-    - Dùng CoinManager để tránh đụng coin.
-    - Dùng GLOBAL_EVENT_BUS để đẩy log + data ra frontend.
-    """
-
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -1228,13 +1079,11 @@ class BotManager:
         self.start_time = time.time()
         self.user_states: Dict[str, Dict[str, Any]] = {}
 
-        # Config hiện tại (để sau này set_config có thể cập nhật)
         self.api_key = api_key
         self.api_secret = api_secret
         self.telegram_bot_token = telegram_bot_token
         self.telegram_chat_id = telegram_chat_id
 
-        # Event bus cho frontend
         self.event_bus = event_bus or GLOBAL_EVENT_BUS
 
         self.bot_coordinator = BotExecutionCoordinator()
@@ -1244,27 +1093,12 @@ class BotManager:
         if api_key and api_secret:
             self._verify_api_connection()
             self.log("🟢 HỆ THỐNG BOT QUEUE ĐÃ KHỞI ĐỘNG - CƠ CHẾ FIFO")
-
-            # Nếu vẫn muốn dùng telegram thì giữ nguyên
-            self.telegram_thread = threading.Thread(
-                target=self._telegram_listener, daemon=True
-            )
-            self.telegram_thread.start()
-
-            if self.telegram_chat_id:
-                self.send_main_menu(self.telegram_chat_id)
         else:
             self.log("⚡ BotManager khởi động ở mode chưa cấu hình API")
 
-    # ----------------- LOG & TELEGRAM ----------------- #
+    # ---- LOG ---- #
 
-    def log(self, message, level="info"):
-        """
-        Log hệ thống:
-        - Gửi ra logger
-        - Gửi ra FrontendEventBus (type=system_log)
-        - (Option) Gửi Telegram nếu có
-        """
+    def log(self, message: str, level: str = "info") -> None:
         event = {
             "type": "system_log",
             "level": level,
@@ -1277,7 +1111,7 @@ class BotManager:
         important_keywords = ["❌", "✅", "⛔", "💰", "📈", "📊", "🎯", "🛡️", "🔴", "🟢", "⚠️", "🚫"]
         log_text = f"[SYSTEM] {message}"
 
-        if any(keyword in message for keyword in important_keywords):
+        if any(k in message for k in important_keywords):
             logger.warning(log_text)
         else:
             logger.info(log_text)
@@ -1293,10 +1127,9 @@ class BotManager:
             except Exception as e:
                 logger.error(f"Telegram system log error: {e}")
 
-    # ----------------- KẾT NỐI BINANCE ----------------- #
+    # ---- KẾT NỐI BINANCE ---- #
 
-    def _verify_api_connection(self):
-        """Gọi thử lên Binance để kiểm tra API."""
+    def _verify_api_connection(self) -> None:
         try:
             balance = get_balance(self.api_key, self.api_secret)
             self.log(f"✅ Kết nối Binance thành công! Số dư: {balance} USDC")
@@ -1311,12 +1144,7 @@ class BotManager:
         telegram_bot_token: Optional[str] = None,
         telegram_chat_id: Optional[str] = None,
         restart_bots: bool = True,
-    ):
-        """
-        Dùng khi bạn sửa cấu hình trong database:
-        - Cập nhật API key/secret (và telegram nếu muốn).
-        - Option: dừng tất cả bot, reset WebSocket, để khởi tạo lại theo config mới.
-        """
+    ) -> None:
         self.log("⚙️ Nhận cấu hình mới từ backend (set_config)")
 
         self.api_key = api_key
@@ -1326,37 +1154,17 @@ class BotManager:
 
         if restart_bots:
             self.log("🔄 Dừng toàn bộ bot để áp dụng cấu hình mới")
-            # Dừng bot cũ
             self.stop_all()
             self.bots = {}
-
-            # Dừng WebSocket cũ
             try:
                 self.ws_manager.stop()
             except Exception:
                 pass
-
-            # Tạo WebSocket manager mới cho sạch sẽ
             self.ws_manager = WebSocketManager()
 
         self._verify_api_connection()
 
-    # ----------------- TELEGRAM (GIỮ NGUYÊN CHO AI DÙNG) ----------------- #
-
-    def _telegram_listener(self):
-        """Ở đây tuỳ bạn, có thể bỏ nếu chuyển sang web hoàn toàn."""
-        # Để đơn giản, mình không implement lại logic Telegram chi tiết trong file này.
-        # Nếu bạn vẫn cần dùng Telegram, có thể ghép lại phần cũ.
-        pass
-
-    def send_main_menu(self, chat_id):
-        """Gửi menu chính qua Telegram (nếu bạn còn dùng)."""
-        if not self.telegram_bot_token:
-            return
-        text = "📊 Hệ thống bot Futures Queue đã khởi động."
-        send_telegram(text, chat_id=chat_id, bot_token=self.telegram_bot_token)
-
-    # ----------------- QUẢN LÝ BOT ----------------- #
+    # ---- QUẢN LÝ BOT ---- #
 
     def add_bot(
         self,
@@ -1368,17 +1176,10 @@ class BotManager:
         roi_trigger: Optional[float],
         max_coins: int = 1,
     ) -> str:
-        """
-        Thêm 1 bot mới với chiến lược nhất định.
-        strategy_name: tạm thời chỉ dùng "RSI-Volume-System-Queue"
-        """
         bot_id = f"DYNAMIC_{strategy_name}_{int(time.time())}_{len(self.bots)}"
-
-        # Chọn class bot theo strategy_name (ở đây dùng GlobalMarketBot)
-        bot_class = GlobalMarketBot
-
+        bot_class = GlobalMarketBot  # tạm thời 1 strategy
         bot = bot_class(
-            symbol="AUTO",  # sẽ tự tìm coin
+            symbol="AUTO",
             lev=lev,
             percent=percent,
             tp=tp,
@@ -1394,9 +1195,8 @@ class BotManager:
             bot_coordinator=self.bot_coordinator,
             bot_id=bot_id,
             max_coins=max_coins,
-            event_bus=self.event_bus,  # <-- truyền event_bus
+            event_bus=self.event_bus,
         )
-
         self.bots[bot_id] = bot
         bot.start()
         self.log(
@@ -1405,7 +1205,7 @@ class BotManager:
         )
         return bot_id
 
-    def stop_bot(self, bot_id: str):
+    def stop_bot(self, bot_id: str) -> None:
         bot = self.bots.get(bot_id)
         if not bot:
             self.log(f"⚠️ stop_bot: không tìm thấy bot_id = {bot_id}", "warning")
@@ -1416,29 +1216,25 @@ class BotManager:
         self.log(f"⏹ Đã dừng bot {bot_id}")
         del self.bots[bot_id]
 
-    def stop_all(self):
+    def stop_all(self) -> None:
         for bot_id in list(self.bots.keys()):
             self.stop_bot(bot_id)
 
-    # ----------------- DASHBOARD & FRONTEND API ----------------- #
+    # ---- STATE & CHART ---- #
 
     def get_state(self) -> Dict[str, Any]:
-        """
-        Trả về snapshot trạng thái hệ thống ở dạng dict (JSON-serializable)
-        để frontend hiển thị dashboard.
-        """
         bots_info: Dict[str, Any] = {}
         for bot_id, bot in self.bots.items():
             bot_data = {
                 "bot_id": bot_id,
-                "strategy": getattr(bot, "strategy_name", None),
+                "strategy": bot.strategy_name,
                 "status": bot.status,
                 "leverage": bot.lev,
                 "percent": bot.percent,
                 "tp": bot.tp,
                 "sl": bot.sl,
                 "roi_trigger": bot.roi_trigger,
-                "active_symbols": list(getattr(bot, "active_symbols", [])),
+                "active_symbols": list(bot.active_symbols),
                 "symbol_data": {},
             }
             for sym, sd in bot.symbol_data.items():
@@ -1470,8 +1266,16 @@ class BotManager:
             "bots": bots_info,
         }
 
-
-# --------------- TIỆN ÍCH DÙNG TỪ BÊN NGOÀI (ví dụ FastAPI) --------------- #
+    def get_chart_data(self, symbol: str, limit: int = 60) -> Dict[str, Any]:
+        """
+        Dữ liệu cho biểu đồ nến: 20–60 nến 1m gần nhất.
+        """
+        klines = get_klines(symbol, interval="1m", limit=limit)
+        return {
+            "symbol": symbol,
+            "interval": "1m",
+            "candles": klines,
+        }
 
 
 def create_bot_manager(
@@ -1481,10 +1285,6 @@ def create_bot_manager(
     telegram_chat_id: Optional[str] = None,
     event_bus: Optional[FrontendEventBus] = None,
 ) -> BotManager:
-    """
-    Hàm tạo BotManager chuẩn cho backend:
-    - Mặc định dùng GLOBAL_EVENT_BUS nếu không truyền event_bus.
-    """
     if event_bus is None:
         event_bus = GLOBAL_EVENT_BUS
     manager = BotManager(
