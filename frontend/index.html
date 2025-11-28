@@ -2,14 +2,212 @@
 <html lang="vi">
 <head>
   <meta charset="UTF-8" />
-  <title>Quan Trading Dashboard</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="/frontend/style.css" />
-  <!-- Chart.js cho biểu đồ -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <title>Futures Queue Trading Bot Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f3f4f6; margin: 0; padding: 0; }
+    h2 { margin: 16px; }
+    .container { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+    .card { background: #fff; border-radius: 10px; padding: 12px 16px;
+            box-shadow: 0 1px 4px rgba(0,0,0,.1); flex: 1 1 300px; }
+    pre { background: #111; color: #0f0; padding: 8px; overflow-y: scroll; height: 260px; }
+    .label { font-weight: bold; }
+    canvas { width: 100%; height: 260px; border: 1px solid #ddd; border-radius: 6px; }
+    input, select, button { padding: 4px 8px; margin: 4px 2px; }
+  </style>
 </head>
 <body>
-  <div id="app"></div>
-  <script src="/frontend/app.js" defer></script>
+  <h2>🚀 Futures Queue Trading Bot Dashboard</h2>
+
+  <div class="container">
+    <div class="card">
+      <h3>📊 Tổng quan</h3>
+      <div id="summary">Đang tải...</div>
+    </div>
+
+    <div class="card">
+      <h3>⚙️ Điều khiển Bot</h3>
+      <div>
+        <button onclick="stopAll()">⏹ Dừng toàn bộ bot</button>
+      </div>
+      <hr>
+      <div>
+        <div><span class="label">Thêm bot mới:</span></div>
+        <label>Leverage: <input id="lev" type="number" value="50"></label><br>
+        <label>% vốn: <input id="percent" type="number" value="5"></label><br>
+        <label>TP%: <input id="tp" type="number" value="20"></label><br>
+        <label>SL%: <input id="sl" type="number" value="200"></label><br>
+        <label>ROI Trigger%: <input id="roi" type="number" value="30"></label><br>
+        <label>Số coin tối đa/bot: <input id="max_coins" type="number" value="1"></label><br>
+        <button onclick="addBot()">➕ Thêm bot</button>
+      </div>
+      <hr>
+      <div>
+        <h4>Danh sách bot</h4>
+        <div id="bot-list">Đang tải...</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>📈 Biểu đồ nến (1m)</h3>
+      <div>
+        <label>Symbol: <input id="chart-symbol" value="BTCUSDC"></label>
+        <label>Số nến:
+          <select id="chart-limit">
+            <option value="20">20</option>
+            <option value="40">40</option>
+            <option value="60" selected>60</option>
+          </select>
+        </label>
+        <button onclick="loadChart()">Lấy dữ liệu</button>
+      </div>
+      <canvas id="chart-canvas"></canvas>
+    </div>
+
+    <div class="card">
+      <h3>🧾 Log realtime</h3>
+      <pre id="log"></pre>
+    </div>
+  </div>
+
+<script>
+async function refreshState() {
+  try {
+    const r = await fetch('/api/state');
+    const d = await r.json();
+    document.getElementById('summary').innerHTML =
+      `<div><span class="label">Số bot:</span> ${d.bot_count}</div>
+       <div><span class="label">Balance:</span> ${d.balance ?? 'N/A'} USDC</div>
+       <div><span class="label">Symbols WS:</span> ${d.ws_symbols.join(', ')}</div>
+       <div><span class="label">Bot đang quét:</span> ${d.queue.current_bot_id || 'None'}</div>`;
+
+    const bots = d.bots || {};
+    const htmlBots = Object.values(bots).map(b => {
+      const syms = (b.active_symbols || []).join(', ');
+      return `<div style="margin-bottom:6px; border-bottom:1px solid #eee; padding-bottom:4px;">
+        <div><b>${b.bot_id}</b> [${b.strategy}]</div>
+        <div>Trạng thái: ${b.status} | Lev: ${b.leverage}x | % vốn: ${b.percent}%</div>
+        <div>TP/SL: ${b.tp}% / ${b.sl}% | ROI Trigger: ${b.roi_trigger}%</div>
+        <div>Symbols: ${syms || 'None'}</div>
+        <button onclick="stopBot('${b.bot_id}')">⏹ Stop bot này</button>
+      </div>`;
+    }).join('') || 'Chưa có bot nào';
+
+    document.getElementById('bot-list').innerHTML = htmlBots;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function refreshLogs() {
+  try {
+    const r = await fetch('/api/events?limit=80');
+    const d = await r.json();
+    const lines = d.map(ev => {
+      const t = new Date(ev.timestamp * 1000).toLocaleTimeString();
+      const msg = ev.message || JSON.stringify(ev);
+      return `[${t}] (${ev.type}) ${msg}`;
+    }).join('\n');
+    document.getElementById('log').textContent = lines;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function addBot() {
+  const body = {
+    strategy_name: "RSI-Volume-System-Queue",
+    lev: Number(document.getElementById('lev').value),
+    percent: Number(document.getElementById('percent').value),
+    tp: Number(document.getElementById('tp').value),
+    sl: Number(document.getElementById('sl').value),
+    roi_trigger: Number(document.getElementById('roi').value),
+    max_coins: Number(document.getElementById('max_coins').value),
+  };
+  const r = await fetch('/api/add-bot', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  const d = await r.json();
+  alert('Thêm bot: ' + JSON.stringify(d));
+  refreshState();
+}
+
+async function stopBot(botId) {
+  const r = await fetch('/api/stop-bot/' + botId, { method: 'POST' });
+  const d = await r.json();
+  alert(d.msg);
+  refreshState();
+}
+
+async function stopAll() {
+  const r = await fetch('/api/stop-all', { method: 'POST' });
+  const d = await r.json();
+  alert(d.msg);
+  refreshState();
+}
+
+async function loadChart() {
+  const symbol = document.getElementById('chart-symbol').value.trim();
+  const limit = Number(document.getElementById('chart-limit').value);
+  if (!symbol) {
+    alert('Nhập symbol, ví dụ BTCUSDC');
+    return;
+  }
+  const r = await fetch(`/api/chart?symbol=${symbol}&limit=${limit}`);
+  const d = await r.json();
+  drawChart(d.candles || []);
+}
+
+// Vẽ chart line đơn giản từ giá close
+function drawChart(candles) {
+  const canvas = document.getElementById('chart-canvas');
+  const ctx = canvas.getContext('2d');
+
+  const width = canvas.width = canvas.clientWidth;
+  const height = canvas.height = canvas.clientHeight;
+
+  ctx.clearRect(0, 0, width, height);
+
+  if (!candles.length) {
+    ctx.fillText('Không có dữ liệu', 10, 20);
+    return;
+  }
+
+  const closes = candles.map(c => c.close);
+  const minPrice = Math.min(...closes);
+  const maxPrice = Math.max(...closes);
+
+  const padding = 20;
+  const usableWidth = width - padding * 2;
+  const usableHeight = height - padding * 2;
+
+  function x(i) {
+    if (candles.length === 1) return width / 2;
+    return padding + (i / (candles.length - 1)) * usableWidth;
+  }
+  function y(price) {
+    if (maxPrice === minPrice) return height / 2;
+    const ratio = (price - minPrice) / (maxPrice - minPrice);
+    return height - padding - ratio * usableHeight;
+  }
+
+  ctx.beginPath();
+  ctx.moveTo(x(0), y(closes[0]));
+  for (let i = 1; i < candles.length; i++) {
+    ctx.lineTo(x(i), y(closes[i]));
+  }
+  ctx.stroke();
+
+  // Vẽ trục giá min / max
+  ctx.fillText(maxPrice.toFixed(4), 5, y(maxPrice));
+  ctx.fillText(minPrice.toFixed(4), 5, y(minPrice));
+}
+
+setInterval(refreshState, 3000);
+setInterval(refreshLogs, 2000);
+refreshState();
+refreshLogs();
+</script>
 </body>
 </html>
